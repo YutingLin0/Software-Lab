@@ -1,16 +1,39 @@
 /* Neon Expanding Polygons 
- * - Tap: spawns expanding neon pads + short pluck
- * - Drag: continuous trail with throttling for smoothness
+ * - Tap: expanding neon pads + pluck
+ * - Drag: continuous trail
+ * - Keyboard: each key has its own area, with random jitter in that region
  */
 
 let polys = [];
 
-// p5.sound detection
+/* -------- Fixed key layout → position mapping -------- */
+
+// approximate QWERTY rows flattened
+const KEY_LAYOUT = "1234567890qwertyuiopasdfghjklzxcvbnm";
+
+function keyToPos(k){
+  const idx = KEY_LAYOUT.indexOf(k.toLowerCase());
+  if (idx === -1) return null;
+
+  const cols = 10; // arrange keys into 10 columns
+  const rows = Math.ceil(KEY_LAYOUT.length / cols);
+
+  const col = idx % cols;
+  const row = Math.floor(idx / cols);
+
+  // map column & row into canvas region
+  const x = map(col, 0, cols - 1, width * 0.1, width * 0.9);
+  const y = map(row, 0, rows - 1, height * 0.2, height * 0.8);
+
+  return { x, y };
+}
+
+/* -------- p5.sound detection & audio unlock -------- */
+
 const hasSound = typeof window.p5 !== "undefined"
   && typeof p5.Oscillator === "function"
   && typeof p5.Envelope === "function";
 
-// audio unlock once on first interaction
 let audioUnlocked = false;
 function unlockAudioOnce() {
   if (audioUnlocked || !hasSound) return;
@@ -20,30 +43,35 @@ function unlockAudioOnce() {
     if (ctx && ctx.state !== 'running') ctx.resume();
     if (!ctx || ctx.state === 'running') {
       audioUnlocked = true;
-      ['pointerdown','touchstart','mousedown','visibilitychange'].forEach(type => {
+      ['pointerdown','touchstart','mousedown','keydown','visibilitychange'].forEach(type => {
         window.removeEventListener(type, unlockAudioOnce, true);
         document.removeEventListener(type, unlockAudioOnce, true);
       });
     }
   } catch(_) {}
 }
-['pointerdown','touchstart','mousedown','visibilitychange'].forEach(t=>{
+
+// global listeners only used to unlock audio
+['pointerdown','touchstart','mousedown','keydown','visibilitychange'].forEach(t=>{
   window.addEventListener(t, unlockAudioOnce, {capture:true, passive:false});
   document.addEventListener(t, unlockAudioOnce, {capture:true, passive:false});
 });
 function ensureAudio(){ unlockAudioOnce(); }
 
-// simple pluck on touch-down
 function playPluck(freq, amp=0.7) {
   if (!hasSound || !audioUnlocked) return;
   const osc = new p5.Oscillator('triangle');
-  const env = new p5.Envelope(0.005, 1.0, 0.12, 0.0); // quick pluck
-  osc.start(); osc.freq(freq, 0); osc.amp(env);
-  env.mult(amp); env.play(osc);
+  const env = new p5.Envelope(0.005, 1.0, 0.12, 0.0);
+  osc.start();
+  osc.freq(freq, 0);
+  osc.amp(env);
+  env.mult(amp);
+  env.play(osc);
   osc.stop(getAudioContext().currentTime + 0.2);
 }
 
-/* Echo Map (soft memory dots) */
+/* -------- Echo Map (soft memory dots) -------- */
+
 const echoMap = []; // {x,y,hue,time}
 let echoAlpha = 0;
 function logEcho(x,y,hue){
@@ -53,7 +81,9 @@ function logEcho(x,y,hue){
 }
 function drawEchoLayer(){
   if (echoAlpha <= 0 || echoMap.length === 0) return;
-  push(); blendMode(ADD); noStroke();
+  push();
+  blendMode(ADD);
+  noStroke();
   for (const e of echoMap) {
     const age = (millis() - e.time)/20000; // 20s horizon
     const a = constrain(echoAlpha * (1 - age*0.25), 0, 0.5);
@@ -63,42 +93,67 @@ function drawEchoLayer(){
   pop();
 }
 
-/* p5 lifecycle */
+/* -------- p5 lifecycle -------- */
+
+let cnv;
 function setup() {
-  const cnv = createCanvas(windowWidth, windowHeight);
+  cnv = createCanvas(windowWidth, windowHeight);
   frameRate(60);
   blendMode(ADD);
   background(10,11,16);
 
-  // Prevent page scroll/zoom over the canvas and enable multi-touch
+  // pointer events + no scroll
   cnv.elt.style.touchAction = 'none';
   cnv.elt.addEventListener('pointerdown', onPointerDown, {passive:false});
   cnv.elt.addEventListener('pointermove', onPointerMove, {passive:false});
   cnv.elt.addEventListener('pointerup', onPointerUp, {passive:false});
   cnv.elt.addEventListener('pointercancel', onPointerUp, {passive:false});
 
+  // make canvas focusable for keyboard
+  cnv.elt.setAttribute('tabindex','0');
+
+  cnv.elt.addEventListener('mousedown', () => cnv.elt.focus());
+  cnv.elt.addEventListener('touchstart', () => cnv.elt.focus());
+
+  // auto-focus shortly after load
+  setTimeout(() => cnv.elt.focus(), 0);
+
+  // hide hint once focused
+  cnv.elt.addEventListener('focus', () => {
+    const hint = document.getElementById('hint');
+    if (hint) hint.style.opacity = '0';
+  });
+
   unlockAudioOnce();
 }
-function windowResized(){ resizeCanvas(windowWidth, windowHeight); }
+
+function windowResized(){
+  resizeCanvas(windowWidth, windowHeight);
+}
 
 function draw(){
   // soft fade for trails
-  push(); blendMode(BLEND); noStroke(); fill(10,11,16,32); rect(0,0,width,height); pop();
+  push();
+  blendMode(BLEND);
+  noStroke();
+  fill(10,11,16,32);
+  rect(0,0,width,height);
+  pop();
+
   drawEchoLayer();
 
   for (const p of polys) p.update();
   polys = polys.filter(p => !p.done);
 }
 
-/* Pointer (multi-touch + trails) */
+/* -------- Pointer (click/touch/drag) -------- */
+
 const activePointers = new Map(); // id -> {x,y,lastX,lastY,lastTime}
 
-// trail density controls
 const TRAIL_MIN_DIST = 20; 
 const TRAIL_MIN_DT   = 28; 
 
 function canvasXY(e){
-  // Map element-relative coords to p5 canvas coords
   const px = e.offsetX * (width / e.target.clientWidth);
   const py = e.offsetY * (height / e.target.clientHeight);
   return {x: px, y: py};
@@ -113,8 +168,10 @@ function onPointerDown(e){
   const now = performance.now();
   activePointers.set(e.pointerId, {x, y, lastX:x, lastY:y, lastTime:now});
 
+  // spawn exactly at click/touch
   spawnAt(x, y);
-  playPluck(map(y, height, 0, 180, 880, true), 0.7);
+  const f = map(y, height, 0, 180, 880, true);
+  playPluck(f, 0.7);
 }
 
 function onPointerMove(e){
@@ -143,9 +200,42 @@ function onPointerUp(e){
   activePointers.delete(e.pointerId);
 }
 
-/* Visuals */
+/* -------- Keyboard support (region + jitter) -------- */
+
+function keyPressed(){
+  handleKey(key);
+  return false; // prevent default browser behavior on some keys
+}
+
+function handleKey(k){
+  ensureAudio();
+
+  // letters/numbers only
+  if (!/^[a-z0-9]$/i.test(k)) return;
+
+  const center = keyToPos(k);
+  if (!center) return;
+
+  // jitter around the center:
+  // tweak these factors to control how wild it feels
+  const jitterX = random(-width * 0.03, width * 0.03);   // ±3% of canvas width
+  const jitterY = random(-height * 0.05, height * 0.05); // ±5% of canvas height
+
+  let x = center.x + jitterX;
+  let y = center.y + jitterY;
+
+  // keep it inside a nice band
+  x = constrain(x, width * 0.08, width * 0.92);
+  y = constrain(y, height * 0.18, height * 0.82);
+
+  spawnAt(x, y);
+  const f = map(y, height, 0, 180, 880, true);
+  playPluck(f, 0.7);
+}
+
+/* -------- Visuals -------- */
+
 function spawnAt(x,y){
-  // polygon sides randomized for variety (tri–oct)
   const sides = random([3,4,5,6,7,8]);
   const hue   = map(y, height, 0, 200, 330);
   const baseGrow  = random(4, 7);
@@ -155,9 +245,34 @@ function spawnAt(x,y){
 
   logEcho(x,y,hue);
 
-  polys.push(new ExpandingPoly({x,y,sides,hue,size:baseSize,grow:baseGrow,thick:baseThick,life:baseLife,alpha:0.85,blur:26}));
-  polys.push(new ExpandingPoly({x,y,sides,hue,size:baseSize*0.6,grow:baseGrow*1.2,thick:baseThick*0.8,life:baseLife*0.9,alpha:0.75,blur:22,spin:random(-0.02,0.02)}));
-  polys.push(new ExpandingPoly({x,y,sides,hue,size:baseSize*1.2,grow:baseGrow*0.9,thick:baseThick*0.6,life:baseLife*1.2,alpha:0.5,blur:34}));
+  polys.push(new ExpandingPoly({
+    x,y,sides,hue,
+    size:baseSize,
+    grow:baseGrow,
+    thick:baseThick,
+    life:baseLife,
+    alpha:0.85,
+    blur:26
+  }));
+  polys.push(new ExpandingPoly({
+    x,y,sides,hue,
+    size:baseSize*0.6,
+    grow:baseGrow*1.2,
+    thick:baseThick*0.8,
+    life:baseLife*0.9,
+    alpha:0.75,
+    blur:22,
+    spin:random(-0.02,0.02)
+  }));
+  polys.push(new ExpandingPoly({
+    x,y,sides,hue,
+    size:baseSize*1.2,
+    grow:baseGrow*0.9,
+    thick:baseThick*0.6,
+    life:baseLife*1.2,
+    alpha:0.5,
+    blur:34
+  }));
   polys.push(new Crosshair(x,y,hue));
 }
 
@@ -167,11 +282,11 @@ class ExpandingPoly{
     this.sides=max(3, floor(o.sides||6));
     this.hue=o.hue||260;
 
-    this.size=o.size||50;   // diameter
-    this.grow=o.grow||5;    // px/frame
+    this.size=o.size||50;
+    this.grow=o.grow||5;
     this.thick=o.thick||12;
 
-    this.life=o.life||1.2;  // sec
+    this.life=o.life||1.2;
     this.age=0;
 
     this.alpha=(o.alpha??0.85);
@@ -184,7 +299,10 @@ class ExpandingPoly{
   update(){
     const dt=deltaTime/1000;
     this.age+=dt;
-    if (this.age>=this.life){ this.done=true; return; }
+    if (this.age>=this.life){
+      this.done=true;
+      return;
+    }
 
     this.size+=this.grow;
     this.thick*=0.985;
@@ -207,12 +325,17 @@ class ExpandingPoly{
 class Crosshair{
   constructor(x,y,h){
     this.x=x; this.y=y; this.h=h;
-    this.life=0.8; this.age=0; this.done=false;
+    this.life=0.8;
+    this.age=0;
+    this.done=false;
   }
   update(){
     const dt=deltaTime/1000;
     this.age+=dt;
-    if (this.age>=this.life){ this.done=true; return; }
+    if (this.age>=this.life){
+      this.done=true;
+      return;
+    }
     const a = pow(1 - this.age/this.life, 1.5) * 0.9;
 
     push();
@@ -225,7 +348,8 @@ class Crosshair{
   }
 }
 
-/* Helpers */
+/* -------- Helpers -------- */
+
 function polygon(x,y,r,n){
   beginShape();
   for (let i=0;i<n;i++){
@@ -234,6 +358,7 @@ function polygon(x,y,r,n){
   }
   endShape(CLOSE);
 }
+
 function hsla(h,s,l,a){
   colorMode(HSB,360,100,100,1);
   const c=color(h,s,l,a);
