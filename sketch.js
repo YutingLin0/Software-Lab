@@ -1,10 +1,14 @@
-/* Neon Expanding Polygons 
- * - Tap: expanding neon pads + pluck
- * - Drag: continuous trail
+/* Neon Expanding Polygons + Trails & Sparks
+ * - Tap: expanding neon pads + pluck + sparks
+ * - Drag: continuous trail of pads and sparks
  * - Keyboard: each key has its own area, with random jitter in that region
+ *            and a connecting trail between successive key presses
  */
 
 let polys = [];
+let sparks = [];   // small moving particles (+ and dots)
+let links  = [];   // trails between consecutive key presses
+let lastKeyPos = null;
 
 /* -------- Fixed key layout → position mapping -------- */
 
@@ -142,8 +146,17 @@ function draw(){
 
   drawEchoLayer();
 
+  // main neon polys
   for (const p of polys) p.update();
   polys = polys.filter(p => !p.done);
+
+  // connecting key trails
+  for (const l of links) l.update();
+  links = links.filter(l => !l.done);
+
+  // small sparks
+  for (const s of sparks) s.update();
+  sparks = sparks.filter(s => !s.done);
 }
 
 /* -------- Pointer (click/touch/drag) -------- */
@@ -168,8 +181,10 @@ function onPointerDown(e){
   const now = performance.now();
   activePointers.set(e.pointerId, {x, y, lastX:x, lastY:y, lastTime:now});
 
-  // spawn exactly at click/touch
-  spawnAt(x, y);
+  const hue = map(y, height, 0, 200, 330);
+  spawnAt(x, y, hue);
+  spawnSparks(x, y, hue, 1.0);
+
   const f = map(y, height, 0, 180, 880, true);
   playPluck(f, 0.7);
 }
@@ -188,7 +203,9 @@ function onPointerMove(e){
   const dt = now - p.lastTime;
 
   if (dist >= TRAIL_MIN_DIST || dt >= TRAIL_MIN_DT){
-    spawnAt(x, y);
+    const hue = map(y, height, 0, 200, 330);
+    spawnAt(x, y, hue);
+    spawnSparks(x, y, hue, 0.7);
     p.lastX = x; p.lastY = y; p.lastTime = now;
   }
 
@@ -200,7 +217,7 @@ function onPointerUp(e){
   activePointers.delete(e.pointerId);
 }
 
-/* -------- Keyboard support (region + jitter) -------- */
+/* -------- Keyboard support (region + jitter + linking trail) -------- */
 
 function keyPressed(){
   handleKey(key);
@@ -216,28 +233,34 @@ function handleKey(k){
   const center = keyToPos(k);
   if (!center) return;
 
-  // jitter around the center:
-  // tweak these factors to control how wild it feels
   const jitterX = random(-width * 0.03, width * 0.03);   // ±3% of canvas width
   const jitterY = random(-height * 0.05, height * 0.05); // ±5% of canvas height
 
   let x = center.x + jitterX;
   let y = center.y + jitterY;
 
-  // keep it inside a nice band
   x = constrain(x, width * 0.08, width * 0.92);
   y = constrain(y, height * 0.18, height * 0.82);
 
-  spawnAt(x, y);
+  const hue = map(y, height, 0, 200, 330);
+
+  // link to previous key press
+  if (lastKeyPos){
+    links.push(new KeyLink(lastKeyPos.x, lastKeyPos.y, x, y, (lastKeyPos.hue + hue)/2));
+  }
+  lastKeyPos = {x,y,hue};
+
+  spawnAt(x, y, hue);
+  spawnSparks(x, y, hue, 1.0);
+
   const f = map(y, height, 0, 180, 880, true);
   playPluck(f, 0.7);
 }
 
-/* -------- Visuals -------- */
+/* -------- Visuals: polys + sparks + key trails -------- */
 
-function spawnAt(x,y){
+function spawnAt(x,y,hue){
   const sides = random([3,4,5,6,7,8]);
-  const hue   = map(y, height, 0, 200, 330);
   const baseGrow  = random(4, 7);
   const baseLife  = random(1.0, 1.6);
   const baseSize  = random(40, 75);
@@ -274,6 +297,25 @@ function spawnAt(x,y){
     blur:34
   }));
   polys.push(new Crosshair(x,y,hue));
+}
+
+/* small moving sparks (dots and plus signs) */
+function spawnSparks(x,y,hue,scale){
+  const count = floor(random(7, 14) * scale);
+  for (let i=0;i<count;i++){
+    const ang = random(TWO_PI);
+    const speed = random(0.4, 1.7) * scale;
+    const vx = cos(ang) * speed;
+    const vy = sin(ang) * speed;
+    const r  = random(3, 7) * scale;
+    const life = random(0.6, 1.4);
+    const shape = random() < 0.4 ? "plus" : "dot"; // more "+" shapes
+    sparks.push(new Spark({
+      x, y, vx, vy, r, life,
+      hue: (hue + random(-20,20)) % 360,
+      shape
+    }));
+  }
 }
 
 class ExpandingPoly{
@@ -344,6 +386,95 @@ class Crosshair{
     strokeWeight(2);
     line(-14, 0, 14, 0);
     line(0, -14, 0, 14);
+    pop();
+  }
+}
+
+/* particles / sparks */
+class Spark{
+  constructor(o){
+    this.x = o.x;
+    this.y = o.y;
+    this.vx = o.vx;
+    this.vy = o.vy;
+    this.r  = o.r;
+    this.hue = o.hue || 260;
+    this.life = o.life || 1.0;
+    this.age = 0;
+    this.shape = o.shape || "dot";
+    this.done = false;
+  }
+  update(){
+    const dt = deltaTime/1000;
+    this.age += dt;
+    if (this.age >= this.life){
+      this.done = true;
+      return;
+    }
+    const t = this.age / this.life;
+    const alpha = pow(1 - t, 1.5);
+
+    // motion
+    this.x += this.vx * (deltaTime/16.6);
+    this.y += this.vy * (deltaTime/16.6);
+    this.vx *= 0.99;
+    this.vy *= 0.99;
+
+    push();
+    translate(this.x, this.y);
+    stroke(hsla(this.hue, 90, 85, alpha));
+    if (this.shape === "plus"){
+      // little "+" spark
+      strokeWeight(1.8);
+      line(-this.r, 0, this.r, 0);
+      line(0, -this.r, 0, this.r);
+    } else {
+      // dot spark
+      noFill();
+      strokeWeight(1.5);
+      circle(0,0,this.r*2);
+    }
+    pop();
+  }
+}
+
+/* connecting trail between two key hits */
+class KeyLink{
+  constructor(x1,y1,x2,y2,hue){
+    this.x1=x1; this.y1=y1;
+    this.x2=x2; this.y2=y2;
+    this.hue=hue||260;
+    this.life=0.9;
+    this.age=0;
+    this.done=false;
+    this.steps = max(6, floor(dist(x1,y1,x2,y2)/40)); // more dots for longer jumps
+  }
+  update(){
+    const dt = deltaTime/1000;
+    this.age += dt;
+    if (this.age >= this.life){
+      this.done = true;
+      return;
+    }
+
+    const t = this.age / this.life;
+    const alpha = pow(1 - t, 1.6);
+
+    const shown = floor(this.steps * min(1, t*1.4)); // grow along the line
+
+    push();
+    blendMode(ADD);
+    strokeWeight(0); // we only draw small shapes
+    for (let i=0;i<shown;i++){
+      const f = this.steps === 1 ? 0.5 : i/(this.steps-1);
+      const px = lerp(this.x1, this.x2, f);
+      const py = lerp(this.y1, this.y2, f);
+      const r  = 5 + 2*sin((t + f)*PI);
+
+      const a = alpha * (0.9 + 0.5*f); // brighter toward the new key
+      fill(hsla(this.hue + f*20, 90, 90, a));
+      circle(px, py, r*2);
+    }
     pop();
   }
 }
