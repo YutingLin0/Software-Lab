@@ -390,7 +390,11 @@ function drawSessionSummary(){
     }
   }
 
-  y += 30;
+  y += 26;
+  text("Image notes:", padX + 20, y); y += 20;
+  text(s.imageDesc, padX + 36, y, width - padX*2 - 56, height);
+  y += 40;
+
   text("Press R to start a new session.", padX + 20, y);
   pop();
 }
@@ -408,15 +412,20 @@ function canvasXY(e){
 }
 
 function onPointerDown(e){
+  ensureAudio();
+  const {x, y} = canvasXY(e);
+
   if (!sessionActive) {
-    ensureAudio();
+    // allow tap-based session choice on tablets/phones
+    if (!sessionEnded) {
+      handleSessionTap(x, y);
+    }
     return;
   }
-  ensureAudio();
+
   e.preventDefault();
   e.target.setPointerCapture?.(e.pointerId);
 
-  const {x, y} = canvasXY(e);
   const now = performance.now();
   activePointers.set(e.pointerId, {x, y, lastX:x, lastY:y, lastTime:now});
 
@@ -482,6 +491,21 @@ function handleSessionSelection(k){
   const durations = { '1':30, '2':60, '3':120, '4':300 };
   const chosen = durations[k];
   if (chosen) startSession(chosen);
+}
+
+// touch-based session selection (for tablets/phones)
+function handleSessionTap(x, y){
+  if (sessionActive || sessionEnded) return;
+  const band = height / 4;
+  if (y < band) {
+    startSession(30);       // top quarter → 30 sec
+  } else if (y < 2 * band) {
+    startSession(60);       // second quarter → 1 min
+  } else if (y < 3 * band) {
+    startSession(120);      // third quarter → 2 min
+  } else {
+    startSession(300);      // bottom quarter → 5 min
+  }
 }
 
 function handleKey(k){
