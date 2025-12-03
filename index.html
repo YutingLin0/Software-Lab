@@ -3,15 +3,23 @@
   <head>
     <meta charset="utf-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1"/>
-    <title>Neon Poly Synth</title>
+    <title>touch, light, echo</title>
+
+    <!-- p5 + sound -->
     <script src="https://cdn.jsdelivr.net/npm/p5@1.9.4/lib/p5.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/p5@1.9.4/lib/addons/p5.sound.min.js"></script>
-    <style>
-      html,body{margin:0;height:100%;background:#05060a}
-      canvas{display:block}
-    </style>
+
+    <!-- styles -->
+    <link rel="stylesheet" href="style.css">
   </head>
   <body>
+    <div id="hint">
+      Click inside the canvas, press <b>1–4</b> to choose a session length,<br/>
+      then type and click/drag to compose.<br/>
+      Type instrument names at any time: <b>piano</b>, <b>drum</b>, <b>flute</b>, <b>guitar</b>, <b>chimes</b>.<br/>
+      Mood is inferred from how fast you play. Spacebar saves a snapshot.
+    </div>
+
     <script src="sketch.js"></script>
   </body>
 </html>

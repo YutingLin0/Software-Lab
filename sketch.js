@@ -1,21 +1,133 @@
-/* Neon Expanding Polygons + Trails & Sparks + Pulse + Mic + Text labels + Sessions */
+/* Neon Expanding Polygons + Trails & Sparks + Pulse + Mic + Text labels
+   + Sessions (music composition) + Auto Mood Tracking + Instrument Modes + Save-as-image
+*/
 
 let polys = [];
-let sparks = [];   // small moving particles (+ and dots)
-let links  = [];   // trails between consecutive key presses
-let labels = [];   // floating text labels
+let sparks = [];
+let links  = [];
+let labels = [];
 let lastKeyPos = null;
-let activityLevel = 0; // global "energy" of the system
+let activityLevel = 0;
 
-// microphone input (real-world connection)
+// microphone
 let mic = null;
 let micLevel = 0;
 let micLevelSmooth = 0;
 
-// small vocabulary of mood words for labels
+// base words
 const WORDS = ["echo", "spark", "drift", "pulse", "glow", "loop", "trail", "bloom"];
 
-/* Session state & statistics */
+const MOOD_WORDS = {
+  calm:    ["drift","float","hush","still","breathe"],
+  anxious: ["static","flicker","scatter","buzz","tangle"],
+  tired:   ["fade","slow","dim","heavy","exhale"],
+  hopeful: ["bloom","rise","gleam","open","reach"],
+  excited: ["flare","spark","burst","rush","shine"],
+  heavy:   ["sink","weight","dense","cloud","press"],
+  unlabeled: WORDS
+};
+
+const MOOD_HUE_SHIFT = {
+  calm: -20,
+  anxious: 10,
+  tired: -10,
+  hopeful: 20,
+  excited: 30,
+  heavy: -30,
+  unlabeled: 0
+};
+
+/* Instrument modes: sound + aesthetic tweaks */
+
+const INSTRUMENTS = {
+  piano: {
+    id: "piano",
+    label: "Piano",
+    wave: "triangle",
+    attack: 0.005,
+    decay: 0.18,
+    freqMul: 1.0,
+    ampMul: 1.0,
+    stopTime: 0.3,
+    hueShift: 0,
+    polySides: [4,5,6,7],
+    polyGrowMul: 1.0,
+    sparkShapeBias: 0.45,
+    pulseAmpMul: 1.0,
+    bgFadeAlpha: 32
+  },
+  drum: {
+    id: "drum",
+    label: "Drums",
+    wave: "square",
+    attack: 0.001,
+    decay: 0.12,
+    freqMul: 0.35,
+    ampMul: 1.25,
+    stopTime: 0.22,
+    hueShift: -40,
+    polySides: [3,4,5],
+    polyGrowMul: 1.4,
+    sparkShapeBias: 0.85,
+    pulseAmpMul: 1.4,
+    bgFadeAlpha: 60
+  },
+  flute: {
+    id: "flute",
+    label: "Flute",
+    wave: "sine",
+    attack: 0.02,
+    decay: 0.38,
+    freqMul: 0.9,
+    ampMul: 0.9,
+    stopTime: 0.45,
+    hueShift: 25,
+    polySides: [5,6,7,8],
+    polyGrowMul: 0.85,
+    sparkShapeBias: 0.2,
+    pulseAmpMul: 0.95,
+    bgFadeAlpha: 20
+  },
+  guitar: {
+    id: "guitar",
+    label: "Guitar",
+    wave: "sawtooth",
+    attack: 0.003,
+    decay: 0.24,
+    freqMul: 1.1,
+    ampMul: 1.15,
+    stopTime: 0.35,
+    hueShift: -10,
+    polySides: [3,5,6],
+    polyGrowMul: 1.15,
+    sparkShapeBias: 0.6,
+    pulseAmpMul: 1.1,
+    bgFadeAlpha: 40
+  },
+  chimes: {
+    id: "chimes",
+    label: "Chimes",
+    wave: "sine",
+    attack: 0.01,
+    decay: 0.45,
+    freqMul: 1.4,
+    ampMul: 1.2,
+    stopTime: 0.6,
+    hueShift: 45,
+    polySides: [6,8],
+    polyGrowMul: 0.95,
+    sparkShapeBias: 0.3,
+    pulseAmpMul: 1.25,
+    bgFadeAlpha: 22
+  }
+};
+
+let currentInstrument = "piano";
+let instrumentNotice = null;
+let instrumentNoticeTime = 0;
+let instrumentCommandBuffer = "";
+
+/* Session state */
 
 let sessionActive = false;
 let sessionEnded  = false;
@@ -23,35 +135,34 @@ let sessionDurationMs = 0;
 let sessionStartTime  = 0;
 let sessionSummary = null;
 
+// auto mood
+let selectedMood = null; 
+let recentKeyTimes = [];
+
 // stats
-let keyCounts = {};     // char -> count
+let keyCounts = {};
 let totalKeys = 0;
 let clickCount = 0;
 let dragSpawnCount = 0;
-let trajectoryLength = 0; // total distance between consecutive key points
-let keyPositions = [];  // {x,y}
 let firstKeyTime = null;
 let lastKeyTime  = null;
 
-/* Fixed key layout → position mapping */
+/* Key layout */
 
-// approximate QWERTY rows flattened
 const KEY_LAYOUT = "1234567890qwertyuiopasdfghjklzxcvbnm";
 
 function keyToPos(k){
   const idx = KEY_LAYOUT.indexOf(k.toLowerCase());
   if (idx === -1) return null;
-
-  const cols = 10; // arrange keys into 10 columns
+  const cols = 10;
   const col = idx % cols;
   const row = Math.floor(idx / cols);
-
   const x = map(col, 0, cols - 1, width * 0.1, width * 0.9);
   const y = map(row, 0, Math.ceil(KEY_LAYOUT.length / cols) - 1, height * 0.2, height * 0.8);
   return { x, y };
 }
 
-/* p5.sound detection & audio unlock */
+/* p5.sound unlock */
 
 const hasSound = typeof window.p5 !== "undefined"
   && typeof p5.Oscillator === "function"
@@ -74,28 +185,70 @@ function unlockAudioOnce() {
   } catch(_) {}
 }
 
-// global listeners only used to unlock audio
 ['pointerdown','touchstart','mousedown','keydown','visibilitychange'].forEach(t=>{
   window.addEventListener(t, unlockAudioOnce, {capture:true, passive:false});
   document.addEventListener(t, unlockAudioOnce, {capture:true, passive:false});
 });
 const ensureAudio = () => unlockAudioOnce();
 
-function playPluck(freq, amp=0.7) {
-  if (!hasSound || !audioUnlocked) return;
-  const osc = new p5.Oscillator('triangle');
-  const env = new p5.Envelope(0.005, 1.0, 0.12, 0.0);
-  osc.start();
-  osc.freq(freq, 0);
-  osc.amp(env);
-  env.mult(amp);
-  env.play(osc);
-  osc.stop(getAudioContext().currentTime + 0.2);
+/* Instrument helpers */
+
+function getInstrumentConfig() {
+  return INSTRUMENTS[currentInstrument] || INSTRUMENTS.piano;
 }
 
-/* Echo Map (soft memory dots) */
+function setInstrument(name) {
+  if (!INSTRUMENTS[name]) return;
+  currentInstrument = name;
+  instrumentNotice = `Instrument: ${INSTRUMENTS[name].label}`;
+  instrumentNoticeTime = millis();
+}
 
-const echoMap = []; // {x,y,hue,time}
+function handleInstrumentTyping(ch){
+  const lower = ch.toLowerCase();
+  if (!/[a-z]/.test(lower)) return;
+  instrumentCommandBuffer += lower;
+  if (instrumentCommandBuffer.length > 12) {
+    instrumentCommandBuffer = instrumentCommandBuffer.slice(-12);
+  }
+  const words = ["piano","drum","flute","guitar","chimes"];
+  for (const w of words) {
+    if (instrumentCommandBuffer.endsWith(w)) {
+      setInstrument(w);
+      instrumentCommandBuffer = "";
+      break;
+    }
+  }
+}
+
+function playPluck(freq, amp=0.7) {
+  if (!hasSound || !audioUnlocked) return;
+  const cfg = getInstrumentConfig();
+
+  const osc = new p5.Oscillator(cfg.wave || "triangle");
+  const env = new p5.Envelope(cfg.attack || 0.005, 1.0, cfg.decay || 0.12, 0.0);
+
+  const f = constrain(freq * (cfg.freqMul || 1.0), 80, 3000);
+  const a = amp * (cfg.ampMul || 1.0);
+
+  osc.start();
+  osc.freq(f, 0);
+  osc.amp(env);
+  env.mult(a);
+  env.play(osc);
+
+  const ctx = (typeof getAudioContext === 'function') ? getAudioContext() : null;
+  const stopTime = (cfg.stopTime || 0.3);
+  if (ctx) {
+    osc.stop(ctx.currentTime + stopTime);
+  } else {
+    osc.stop();
+  }
+}
+
+/* Echo layer */
+
+const echoMap = [];
 let echoAlpha = 0;
 function logEcho(x,y,hue){
   echoMap.push({x,y,hue,time:millis()});
@@ -108,7 +261,7 @@ function drawEchoLayer(){
   blendMode(ADD);
   noStroke();
   for (const e of echoMap) {
-    const age = (millis() - e.time)/20000; // 20s horizon
+    const age = (millis() - e.time)/20000;
     const a = constrain(echoAlpha * (1 - age*0.25), 0, 0.5);
     fill(hsla(e.hue, 80, 30, a));
     circle(e.x, e.y, 22);
@@ -116,7 +269,7 @@ function drawEchoLayer(){
   pop();
 }
 
-/* Setup / Draw */
+/* Setup / draw */
 
 let cnv;
 function setup() {
@@ -125,14 +278,12 @@ function setup() {
   blendMode(ADD);
   background(10,11,16);
 
-  // pointer events + no scroll
   cnv.elt.style.touchAction = 'none';
   cnv.elt.addEventListener('pointerdown', onPointerDown, {passive:false});
   cnv.elt.addEventListener('pointermove', onPointerMove, {passive:false});
   cnv.elt.addEventListener('pointerup', onPointerUp, {passive:false});
   cnv.elt.addEventListener('pointercancel', onPointerUp, {passive:false});
 
-  // make canvas focusable for keyboard
   cnv.elt.setAttribute('tabindex','0');
   cnv.elt.addEventListener('mousedown', () => cnv.elt.focus());
   cnv.elt.addEventListener('touchstart', () => cnv.elt.focus());
@@ -143,7 +294,6 @@ function setup() {
     if (hint) hint.style.opacity = '0';
   });
 
-  // microphone
   if (hasSound) {
     mic = new p5.AudioIn();
     mic.start();
@@ -161,12 +311,61 @@ function updateEntities(list){
   return list.filter(e => !e.done);
 }
 
+function drawInstrumentOverlay(){
+  push();
+  blendMode(BLEND);
+  textAlign(CENTER, BOTTOM);
+  textSize(14);
+  fill(230, 220);
+  const cfg = getInstrumentConfig();
+  const info = `Instrument: ${cfg.label}   ·   type piano / drum / flute / guitar / chimes   ·   Spacebar saves a snapshot`;
+  text(info, width * 0.5, height - 16);
+
+  if (instrumentNotice && millis() - instrumentNoticeTime < 1800) {
+    const t = (millis() - instrumentNoticeTime) / 1800;
+    const a = (1 - t) * 220;
+    textSize(18);
+    fill(255, 255, 255, a);
+    text(instrumentNotice, width * 0.5, height * 0.18);
+  }
+  pop();
+}
+
+function updateInferredMood(){
+  const now = millis();
+  const windowMs = 8000;
+  recentKeyTimes = recentKeyTimes.filter(t => now - t <= windowMs);
+
+  const windowSec = windowMs / 1000;
+  const speedNow = recentKeyTimes.length / windowSec;
+
+  if (recentKeyTimes.length === 0 && (clickCount + dragSpawnCount) === 0) {
+    selectedMood = "unlabeled";
+    return;
+  }
+
+  if (speedNow < 0.5) {
+    selectedMood = "tired";
+  } else if (speedNow < 1.2) {
+    selectedMood = "calm";
+  } else if (speedNow < 2.5) {
+    selectedMood = "hopeful";
+  } else if (speedNow < 4.0) {
+    selectedMood = "anxious";
+  } else {
+    selectedMood = "excited";
+  }
+}
+
 function draw(){
+  const cfgBg = getInstrumentConfig();
+  const bgAlpha = cfgBg.bgFadeAlpha ?? 32;
+
   // soft fade
   push();
   blendMode(BLEND);
   noStroke();
-  fill(10,11,16,32);
+  fill(10,11,16,bgAlpha);
   rect(0,0,width,height);
   pop();
 
@@ -176,13 +375,15 @@ function draw(){
     micLevelSmooth = lerp(micLevelSmooth, micLevel, 0.05);
   }
 
-  // sessions
+  if (sessionActive) {
+    updateInferredMood();
+  }
+
   if (sessionActive && sessionDurationMs > 0 &&
       millis() - sessionStartTime >= sessionDurationMs) {
     endSession();
   }
 
-  // global energy
   activityLevel *= 0.97;
   drawPulse(activityLevel, micLevelSmooth);
 
@@ -197,6 +398,11 @@ function draw(){
     drawSessionIntro();
   } else if (sessionEnded && sessionSummary) {
     drawSessionSummary();
+  }
+
+  // instrument hint shown only once a session has been chosen / finished
+  if (sessionActive || sessionEnded) {
+    drawInstrumentOverlay();
   }
 }
 
@@ -215,10 +421,9 @@ function clearVisuals(){
 function resetStats(){
   keyCounts = {};
   totalKeys = clickCount = dragSpawnCount = 0;
-  trajectoryLength = 0;
-  keyPositions = [];
   firstKeyTime = lastKeyTime = null;
   lastKeyPos = null;
+  recentKeyTimes = [];
 }
 
 function startSession(durationSec){
@@ -228,6 +433,7 @@ function startSession(durationSec){
   sessionEnded  = false;
   sessionSummary = null;
 
+  selectedMood = "unlabeled";
   resetStats();
   clearVisuals();
 }
@@ -246,17 +452,24 @@ function endSession(){
     if (spanSec > 0) avgSpeed = totalKeys / spanSec;
   }
 
-  const imageDesc = analyzeImageShape();
-
-  sessionSummary = {
+  const baseSummary = {
     durationSec,
     totalKeys,
     clickCount,
     dragSpawnCount,
     topLetters,
-    avgSpeed,
-    trajectoryLength,
-    imageDesc
+    avgSpeed
+  };
+
+  const mood = selectedMood || "unlabeled";
+  const instrument = currentInstrument;
+  const reflection = buildMoodReflection(mood, instrument, baseSummary);
+
+  sessionSummary = {
+    ...baseSummary,
+    mood,
+    instrument,
+    reflection
   };
 
   console.log("Session summary:", sessionSummary);
@@ -267,54 +480,12 @@ function resetSessionToSelect(){
   sessionEnded  = false;
   sessionDurationMs = 0;
   sessionSummary = null;
+  selectedMood = "unlabeled";
   clearVisuals();
   resetStats();
 }
 
-function analyzeImageShape(){
-  if (keyPositions.length === 0) {
-    return "a quiet field with almost no key strokes.";
-  }
-
-  let minX = Infinity, maxX = -Infinity;
-  let minY = Infinity, maxY = -Infinity;
-  let sumX = 0, sumY = 0;
-
-  for (const p of keyPositions){
-    minX = min(minX, p.x);
-    maxX = max(maxX, p.x);
-    minY = min(minY, p.y);
-    maxY = max(maxY, p.y);
-    sumX += p.x;
-    sumY += p.y;
-  }
-
-  const n = keyPositions.length;
-  const cx = sumX / n;
-  const cy = sumY / n;
-  const spanX = (maxX - minX) / width;
-  const spanY = (maxY - minY) / height;
-
-  let spread;
-  const areaNorm = spanX * spanY;
-  if (areaNorm > 0.5) spread = "filled most of the space";
-  else if (areaNorm > 0.2) spread = "spread across a medium patch";
-  else spread = "clustered into a small constellation";
-
-  let horiz;
-  if (cx < width * 0.35) horiz = "leaning to the left";
-  else if (cx > width * 0.65) horiz = "leaning to the right";
-  else horiz = "balanced near the center";
-
-  let vert;
-  if (cy < height * 0.35) vert = "floating in the upper sky";
-  else if (cy > height * 0.65) vert = "anchored near the bottom";
-  else vert = "hovering around the middle";
-
-  return `a ${spread}, ${horiz}, ${vert}.`;
-}
-
-/* Overlays: intro & summary */
+/* Overlays */
 
 function drawSessionIntro(){
   push();
@@ -327,22 +498,27 @@ function drawSessionIntro(){
   fill(220);
   textAlign(LEFT, TOP);
   textSize(22);
-  text("Choose a session to record your sound drawing:", padX + 20, padY + 18);
+  text("touch, light, echo", padX + 20, padY + 18);
 
   textSize(16);
   const lines = [
-    "Press 1 → 30 seconds",
-    "Press 2 → 1 minute",
-    "Press 3 → 2 minutes",
-    "Press 4 → 5 minutes",
+    "Step 1 · Session length:",
+    "  Press 1 → 30 seconds",
+    "  Press 2 → 1 minute",
+    "  Press 3 → 2 minutes",
+    "  Press 4 → 5 minutes",
     "",
-    "During the session:",
-    "• Type letters/numbers to play notes & draw shapes",
+    "Step 2 · Play:",
+    "• Type letters/numbers to place notes & draw the score",
     "• Click / drag to paint with neon trails",
     "• The center pulse listens to your room through the mic",
     "",
-    "After time runs out, you'll see a summary of your session.",
-    "Press R at any time on the summary screen to start a new session."
+    "Instruments & saving controls appear once a session starts.",
+    "Your mood is inferred automatically from how fast you play.",
+    "",
+    "After time runs out, you'll see a composition analysis.",
+    "Press R on the summary screen for a new session,",
+    "or press Space to save this score as an image."
   ];
 
   let y = padY + 54;
@@ -366,10 +542,24 @@ function drawSessionSummary(){
   fill(230);
   textAlign(LEFT, TOP);
   textSize(22);
-  text("Session summary", padX + 20, padY + 18);
+  text("Composition analysis", padX + 20, padY + 18);
 
   textSize(16);
   let y = padY + 52;
+
+  const moodLabel = s.mood && s.mood !== "unlabeled"
+    ? capitalize(s.mood)
+    : "Not clearly inferred yet";
+  const instrLabel = (INSTRUMENTS[s.instrument]?.label) || "Unknown";
+
+  text(`Inferred mood: ${moodLabel}`, padX + 20, y); y += 20;
+  text(`Instrument: ${instrLabel}`, padX + 20, y); y += 24;
+
+  if (s.reflection) {
+    text("Listening back:", padX + 20, y); y += 20;
+    text(s.reflection, padX + 36, y, width - padX*2 - 56, height);
+    y += 60;
+  }
 
   const durStr = nf(s.durationSec, 0, 1);
   text(`Length: ${durStr} seconds`, padX + 20, y); y += 20;
@@ -390,20 +580,16 @@ function drawSessionSummary(){
     }
   }
 
-  y += 26;
-  text("Image notes:", padX + 20, y); y += 20;
-  text(s.imageDesc, padX + 36, y, width - padX*2 - 56, height);
-  y += 40;
-
-  text("Press R to start a new session.", padX + 20, y);
+  y += 30;
+  text("Press R to start a new session · Press Space to save this score.", padX + 20, y);
   pop();
 }
 
-/* Pointer (click/touch/drag)  */
+/* Pointer handlers */
 
-const activePointers = new Map(); // id -> {x,y,lastX,lastY,lastTime}
-const TRAIL_MIN_DIST = 20; 
-const TRAIL_MIN_DT   = 28; 
+const activePointers = new Map();
+const TRAIL_MIN_DIST = 20;
+const TRAIL_MIN_DT   = 28;
 
 function canvasXY(e){
   const px = e.offsetX * (width / e.target.clientWidth);
@@ -416,7 +602,6 @@ function onPointerDown(e){
   const {x, y} = canvasXY(e);
 
   if (!sessionActive) {
-    // allow tap-based session choice on tablets/phones
     if (!sessionEnded) {
       handleSessionTap(x, y);
     }
@@ -429,7 +614,9 @@ function onPointerDown(e){
   const now = performance.now();
   activePointers.set(e.pointerId, {x, y, lastX:x, lastY:y, lastTime:now});
 
-  const hue = map(y, height, 0, 200, 330);
+  const hueBase = map(y, height, 0, 200, 330);
+  const hue = applyMoodHue(hueBase);
+
   spawnAt(x, y, hue);
   spawnSparks(x, y, hue, 1.0);
 
@@ -454,7 +641,9 @@ function onPointerMove(e){
   const dt = now - p.lastTime;
 
   if (dist >= TRAIL_MIN_DIST || dt >= TRAIL_MIN_DT){
-    const hue = map(y, height, 0, 200, 330);
+    const hueBase = map(y, height, 0, 200, 330);
+    const hue = applyMoodHue(hueBase);
+
     spawnAt(x, y, hue);
     spawnSparks(x, y, hue, 0.7);
 
@@ -474,16 +663,35 @@ function onPointerUp(e){
 
 /* Keyboard support */
 
+function saveCurrentScore(){
+  const cfg = getInstrumentConfig();
+  const name = `touch_light_echo_${cfg.id}_${Date.now()}`;
+  saveCanvas(name, 'png');
+}
+
 function keyPressed(){
+  // instrument typing buffer (only letters)
+  handleInstrumentTyping(key);
+
+  // spacebar: save snapshot 
+  if (keyCode === 32) {
+    saveCurrentScore();
+    return false;
+  }
+
   if (!sessionActive && !sessionEnded) {
     handleSessionSelection(key);
     return false;
   }
+
   if (!sessionActive && sessionEnded) {
     if (key === 'r' || key === 'R') resetSessionToSelect();
     return false;
   }
-  if (sessionActive) handleKey(key);
+
+  if (sessionActive) {
+    handleKey(key);
+  }
   return false;
 }
 
@@ -493,18 +701,17 @@ function handleSessionSelection(k){
   if (chosen) startSession(chosen);
 }
 
-// touch-based session selection (for tablets/phones)
 function handleSessionTap(x, y){
   if (sessionActive || sessionEnded) return;
   const band = height / 4;
   if (y < band) {
-    startSession(30);       // top quarter → 30 sec
+    startSession(30);
   } else if (y < 2 * band) {
-    startSession(60);       // second quarter → 1 min
+    startSession(60);
   } else if (y < 3 * band) {
-    startSession(120);      // third quarter → 2 min
+    startSession(120);
   } else {
-    startSession(300);      // bottom quarter → 5 min
+    startSession(300);
   }
 }
 
@@ -520,21 +727,21 @@ function handleKey(k){
   x = constrain(x, width * 0.08, width * 0.92);
   y = constrain(y, height * 0.18, height * 0.82);
 
-  const hue = map(y, height, 0, 200, 330);
+  const hueBase = map(y, height, 0, 200, 330);
+  const hue = applyMoodHue(hueBase);
 
-  // stats
   const ch = k.toLowerCase();
   keyCounts[ch] = (keyCounts[ch] || 0) + 1;
   totalKeys++;
-  keyPositions.push({x,y});
 
   const now = millis();
   if (firstKeyTime === null) firstKeyTime = now;
   lastKeyTime = now;
+  recentKeyTimes.push(now);
+
   if (lastKeyPos){
     const dx = x - lastKeyPos.x;
     const dy = y - lastKeyPos.y;
-    trajectoryLength += Math.hypot(dx, dy);
     links.push(new KeyLink(lastKeyPos.x, lastKeyPos.y, x, y, (lastKeyPos.hue + hue)/2));
   }
   lastKeyPos = {x,y,hue};
@@ -549,16 +756,23 @@ function handleKey(k){
   playPluck(f, 0.7);
 }
 
-/* Visuals: polys + sparks + key trails */
+/* Visuals */
 
 function spawnAt(x,y,hue){
-  const sides = random([3,4,5,6,7,8]);
-  const baseGrow  = random(4, 7);
+  const cfg = getInstrumentConfig();
+  const sidesOptions = cfg.polySides || [3,4,5,6,7,8];
+  const sides = random(sidesOptions);
+  const growMul = cfg.polyGrowMul || 1.0;
+
+  const baseGrow  = random(4, 7) * growMul;
   const baseLife  = random(1.0, 1.6);
   const baseSize  = random(40, 75);
   const baseThick = random(10, 18);
 
   logEcho(x,y,hue);
+
+  // alternate filled / outline / filled
+  const fills = [true, false, true];
 
   polys.push(new ExpandingPoly({
     x,y,sides,hue,
@@ -567,7 +781,8 @@ function spawnAt(x,y,hue){
     thick:baseThick,
     life:baseLife,
     alpha:0.85,
-    blur:26
+    blur:26,
+    filled:fills[0]
   }));
   polys.push(new ExpandingPoly({
     x,y,sides,hue,
@@ -577,7 +792,8 @@ function spawnAt(x,y,hue){
     life:baseLife*0.9,
     alpha:0.75,
     blur:22,
-    spin:random(-0.02,0.02)
+    spin:random(-0.03,0.03),
+    filled:fills[1]
   }));
   polys.push(new ExpandingPoly({
     x,y,sides,hue,
@@ -586,16 +802,21 @@ function spawnAt(x,y,hue){
     thick:baseThick*0.6,
     life:baseLife*1.2,
     alpha:0.5,
-    blur:34
+    blur:34,
+    filled:fills[2]
   }));
   polys.push(new Crosshair(x,y,hue));
 }
 
 function spawnSparks(x,y,hue,scale){
+  const cfg = getInstrumentConfig();
   const count = floor(random(7, 14) * scale);
+  const plusBias = cfg.sparkShapeBias ?? 0.5;
+
   for (let i=0;i<count;i++){
     const ang = random(TWO_PI);
     const speed = random(0.4, 1.7) * scale;
+    const shape = random() < plusBias ? "plus" : "dot";
     sparks.push(new Spark({
       x, y,
       vx: cos(ang) * speed,
@@ -603,13 +824,19 @@ function spawnSparks(x,y,hue,scale){
       r:  random(3, 7) * scale,
       life: random(0.6, 1.4),
       hue: (hue + random(-20,20)) % 360,
-      shape: random() < 0.4 ? "plus" : "dot"
+      shape
     }));
   }
 }
 
+function getCurrentWordPool(){
+  const pool = MOOD_WORDS[selectedMood];
+  return pool && pool.length ? pool : WORDS;
+}
+
 function spawnLabel(x,y,hue, keyChar){
-  const txt = random() < 0.3 ? random(WORDS) : keyChar.toUpperCase();
+  const pool = getCurrentWordPool();
+  const txt = random() < 0.3 ? random(pool) : keyChar.toUpperCase();
   labels.push(new Label({
     x: x + random(-15, 15),
     y: y + random(-10, 10),
@@ -634,6 +861,7 @@ class ExpandingPoly{
     this.blur=(o.blur??28);
     this.rot=0;
     this.spin=o.spin||random(-0.01,0.01);
+    this.filled = !!o.filled;  // track filled vs outline
     this.done=false;
   }
   update(){
@@ -644,13 +872,21 @@ class ExpandingPoly{
     this.alpha*=0.96;
     this.rot+=this.spin;
 
+    const strokeCol = hsla(this.hue,100,80,this.alpha);
+    const fillCol   = hsla(this.hue,80,30,this.alpha * 1); // subtle neon fill
+
     push();
     translate(this.x,this.y);
     rotate(this.rot);
     drawingContext.shadowColor = hsla(this.hue,100,60,this.alpha);
     drawingContext.shadowBlur  = this.blur;
-    noFill();
-    stroke(hsla(this.hue,100,80,this.alpha));
+    if (this.filled){
+      fill(fillCol);
+      stroke(strokeCol);
+    } else {
+      noFill();
+      stroke(strokeCol);
+    }
     strokeWeight(this.thick);
     polygon(0,0,this.size*0.5,this.sides);
     pop();
@@ -787,32 +1023,83 @@ class KeyLink{
   }
 }
 
-/* Global pulse (reacts to mic + activity) */
+/* Pulse */
+
+function getPulseSettings(){
+  const m = selectedMood;
+  let base = {amp:1.0, jitter:0.2, speed:1.0};
+  if (m === 'calm')    base = {amp:1.0, jitter:0.1, speed:0.7};
+  else if (m === 'anxious') base = {amp:1.2, jitter:0.4, speed:1.3};
+  else if (m === 'tired')   base = {amp:0.8, jitter:0.05, speed:0.5};
+  else if (m === 'hopeful') base = {amp:1.1, jitter:0.2, speed:1.0};
+  else if (m === 'excited') base = {amp:1.3, jitter:0.35, speed:1.5};
+  else if (m === 'heavy')   base = {amp:0.9, jitter:0.15, speed:0.6};
+
+  const cfg = getInstrumentConfig();
+  const ampMul = cfg.pulseAmpMul || 1.0;
+  return {
+    amp: base.amp * ampMul,
+    jitter: base.jitter,
+    speed: base.speed
+  };
+}
 
 function drawPulse(level, micLevelSmooth){
   if (level < 0.02 && micLevelSmooth < 0.01) return;
 
+  const settings = getPulseSettings();
+
   const micBoost = constrain(map(micLevelSmooth, 0, 0.2, 0, 1, true), 0, 1);
-  const combined = constrain(level + micBoost * 0.8, 0, 1);
+  const combinedBase = constrain(level + micBoost * 0.8, 0, 1);
+  const combined = constrain(combinedBase * settings.amp, 0, 1);
 
   const baseR = min(width, height) * 0.15;
-  const r = map(combined, 0, 1, baseR, baseR * 2.6);
-  const hue = (260 + frameCount * 0.25 + micBoost*40) % 360;
+  const rBase = map(combined, 0, 1, baseR, baseR * 2.6);
+  const jitterFactor = (noise(frameCount * 0.05) - 0.5) * 2;
+  const r = rBase * (1 + settings.jitter * jitterFactor);
+
+  // neon pink-ish hue
+  const huePink = 320; // you can tweak this (300–340 range) if you want
+
   const alphaOuter = 0.25 * combined;
   const alphaInner = 0.18 * combined;
 
   push();
-  translate(width/2, height/2);
+  translate(width / 2, height / 2);
   blendMode(ADD);
 
+  // Outer amoeba ring
   noFill();
-  stroke(hsla(hue, 80, 60, alphaOuter));
-  strokeWeight(10);
-  circle(0, 0, r*2);
+  stroke(hsla(huePink, 100, 70, alphaOuter));
+  strokeWeight(8);
+  beginShape();
+  for (let i = 0; i < TWO_PI; i += TWO_PI / 120) {
+    const n = noise(
+      cos(i) * 0.8 + frameCount * 0.01,
+      sin(i) * 0.8 + frameCount * 0.01
+    );
+    const rr = r * (0.85 + n * 0.4);
+    const x = cos(i) * rr;
+    const y = sin(i) * rr;
+    vertex(x, y);
+  }
+  endShape(CLOSE);
 
-  stroke(hsla(hue + 30, 90, 80, alphaInner));
+  // Inner amoeba ring
+  stroke(hsla(huePink + 15, 100, 80, alphaInner)); // slightly lighter pink
   strokeWeight(3);
-  circle(0, 0, r*1.4);
+  beginShape();
+  for (let i = 0; i < TWO_PI; i += TWO_PI / 120) {
+    const n = noise(
+      cos(i) * 0.8 + 100 + frameCount * 0.012,
+      sin(i) * 0.8 + 50  + frameCount * 0.012
+    );
+    const rr = r * 0.6 * (0.9 + n * 0.3);
+    const x = cos(i) * rr;
+    const y = sin(i) * rr;
+    vertex(x, y);
+  }
+  endShape(CLOSE);
 
   pop();
 }
@@ -833,4 +1120,94 @@ function hsla(h,s,l,a){
   const c=color(h,s,l,a);
   colorMode(RGB,255,255,255,1);
   return c;
+}
+
+function applyMoodHue(baseHue){
+  const shiftMood = getMoodHueShift();
+  const shiftInst = getInstrumentHueShift();
+  let h = (baseHue + shiftMood + shiftInst) % 360;
+  if (h < 0) h += 360;
+  return h;
+}
+
+function getMoodHueShift(){
+  if (!selectedMood) return 0;
+  return MOOD_HUE_SHIFT[selectedMood] || 0;
+}
+
+function getInstrumentHueShift(){
+  const cfg = getInstrumentConfig();
+  return cfg.hueShift || 0;
+}
+
+function capitalize(s){
+  if (!s || typeof s !== "string") return "";
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/* Reflection */
+
+function buildMoodReflection(mood, instrument, stats){
+  const name = (mood && mood !== 'unlabeled') ? mood : null;
+  const speed = stats.avgSpeed || 0;
+  const keys = stats.totalKeys || 0;
+  const drags = stats.dragSpawnCount || 0;
+  const clicks = stats.clickCount || 0;
+  const totalPointer = drags + clicks;
+  const instrCfg = INSTRUMENTS[instrument] || INSTRUMENTS.piano;
+  const instrName = instrCfg.label;
+
+  let movementDescriptor;
+  if (keys === 0 && totalPointer === 0) {
+    movementDescriptor = "almost completely still, like a held rest.";
+  } else if (speed < 1.2 && totalPointer < 20) {
+    movementDescriptor = "slow and minimal, like a sparse melody.";
+  } else if (speed < 3) {
+    movementDescriptor = "measured and steady, as if keeping a gentle tempo.";
+  } else {
+    movementDescriptor = "quick and restless, full of jumps and syncopation.";
+  }
+
+  let moodPhrase;
+  switch(name){
+    case 'calm':
+      if (speed > 3) {
+        moodPhrase = "Your gestures started calm but became quick and wide. Maybe more was buzzing underneath than it first felt.";
+      } else {
+        moodPhrase = "Your piece stayed gentle and spacious, with plenty of room between notes.";
+      }
+      break;
+    case 'anxious':
+      if (speed < 1.5) {
+        moodPhrase = "You carried some tension in, but your score moved slowly and softly. This space may have given your nerves room to breathe.";
+      } else {
+        moodPhrase = "Your patterns darted around the staff, mirroring a restless, anxious energy.";
+      }
+      break;
+    case 'tired':
+      if (speed > 2.5) {
+        moodPhrase = "Even if you felt a bit drained, your gestures still sparked bursts of activity. There's more energy in you than you think.";
+      } else {
+        moodPhrase = "Your composition stayed small and soft, like a low, steady pulse.";
+      }
+      break;
+    case 'hopeful':
+      moodPhrase = "Your notes kept reaching outward. Small phrases of light stepping across the space.";
+      break;
+    case 'excited':
+      if (speed > 2) {
+        moodPhrase = "Your score stayed bright, busy, and alive with motion.";
+      } else {
+        moodPhrase = "The excitement came through in short bursts, then settled into something more focused.";
+      }
+      break;
+    default:
+      if (keys === 0 && totalPointer === 0) {
+        moodPhrase = "The score stayed almost empty reflecting a quiet pause.";
+      } else {
+        moodPhrase = "You didn't label a mood, but the way you moved has its own rhythm.";
+      }
+  }
+
+  return `${moodPhrase} In this session your ${instrName.toLowerCase()} phrases felt ${movementDescriptor}`;
 }
