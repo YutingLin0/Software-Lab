@@ -498,7 +498,7 @@ function drawSessionIntro(){
   fill(220);
   textAlign(LEFT, TOP);
   textSize(22);
-  text("touch, light, echo", padX + 20, padY + 18);
+  text("Touch, Light, Echo", padX + 20, padY + 18);
 
   textSize(16);
   const lines = [
